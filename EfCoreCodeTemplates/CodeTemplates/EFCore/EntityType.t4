@@ -1,0 +1,369 @@
+<#@ template hostSpecific="true" #>
+<#@ assembly name="Microsoft.EntityFrameworkCore" #>
+<#@ assembly name="Microsoft.EntityFrameworkCore.Design" #>
+<#@ assembly name="Microsoft.EntityFrameworkCore.Relational" #>
+<#@ assembly name="Microsoft.Extensions.DependencyInjection.Abstractions" #>
+<#@ parameter name="EntityType" type="Microsoft.EntityFrameworkCore.Metadata.IEntityType" #>
+<#@ parameter name="Options" type="Microsoft.EntityFrameworkCore.Scaffolding.ModelCodeGenerationOptions" #>
+<#@ parameter name="NamespaceHint" type="System.String" #>
+<#@ import namespace="System.Collections.Generic" #>
+<#@ import namespace="System.ComponentModel.DataAnnotations" #>
+<#@ import namespace="System.Linq" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="Microsoft.EntityFrameworkCore" #>
+<#@ import namespace="Microsoft.EntityFrameworkCore.Design" #>
+<#@ import namespace="Microsoft.Extensions.DependencyInjection" #>
+<#
+    // Template version: 703 - please do NOT remove this line
+    if (EntityType.IsSimpleManyToManyJoinEntityType())
+    {
+        // Don't scaffold these
+        return "";
+    }
+
+    var services = (IServiceProvider)Host;
+    var annotationCodeGenerator = services.GetRequiredService<IAnnotationCodeGenerator>();
+    var code = services.GetRequiredService<ICSharpHelper>();
+
+    var usings = new List<string>
+    {
+        "System",
+        "System.Collections.Generic",
+        "Microsoft.EntityFrameworkCore",
+        "Microsoft.EntityFrameworkCore.Metadata.Builders",
+    };
+
+    if (Options.UseDataAnnotations)
+    {
+        usings.Add("System.ComponentModel.DataAnnotations");
+        usings.Add("System.ComponentModel.DataAnnotations.Schema");
+        usings.Add("Microsoft.EntityFrameworkCore");
+    }
+
+    if (!string.IsNullOrEmpty(NamespaceHint))
+    {
+#>
+namespace <#= NamespaceHint #>;
+
+<#
+    }
+
+    if (!string.IsNullOrEmpty(EntityType.GetComment()))
+    {
+#>
+/// <summary>
+/// <#= code.XmlComment(EntityType.GetComment()) #>
+/// </summary>
+<#
+    }
+
+    if (Options.UseDataAnnotations)
+    {
+        foreach (var dataAnnotation in EntityType.GetDataAnnotations(annotationCodeGenerator))
+        {
+#>
+<#= code.Fragment(dataAnnotation) #>
+<#
+        }
+    }
+#>
+public class <#= EntityType.Name #>
+{
+<#
+    foreach (var property in EntityType.GetProperties().OrderBy(p => p.GetColumnOrder() ?? -1))
+    {
+        if (!string.IsNullOrEmpty(property.GetComment()))
+        {
+#>
+    /// <summary>
+    /// <#= code.XmlComment(property.GetComment(), indent: 1) #>
+    /// </summary>
+<#
+        }
+
+        if (Options.UseDataAnnotations)
+        {
+            var dataAnnotations = property.GetDataAnnotations(annotationCodeGenerator)
+                .Where(a => !(a.Type == typeof(RequiredAttribute) && Options.UseNullableReferenceTypes && !property.ClrType.IsValueType));
+            foreach (var dataAnnotation in dataAnnotations)
+            {
+#>
+    <#= code.Fragment(dataAnnotation) #>
+<#
+            }
+        }
+
+        usings.AddRange(code.GetRequiredUsings(property.ClrType));
+
+        var needsNullable = Options.UseNullableReferenceTypes && property.IsNullable && !property.ClrType.IsValueType;
+        var needsInitializer = Options.UseNullableReferenceTypes && !property.IsNullable && !property.ClrType.IsValueType;
+#>
+    public <#= code.Reference(property.ClrType) #><#= needsNullable ? "?" : "" #> <#= property.Name #> { get; set; }<#= needsInitializer ? " = null!;" : "" #>
+<#
+    }
+
+    foreach (var navigation in EntityType.GetNavigations())
+    {
+        if (Options.UseDataAnnotations)
+        {
+            foreach (var dataAnnotation in navigation.GetDataAnnotations(annotationCodeGenerator))
+            {
+#>
+    <#= code.Fragment(dataAnnotation) #>
+<#
+            }
+        }
+
+        var targetType = navigation.TargetEntityType.Name;
+        if (navigation.IsCollection)
+        {
+#>
+    public virtual ICollection<<#= targetType #>> <#= navigation.Name #> { get; set; } = new List<<#= targetType #>>();
+<#
+        }
+        else
+        {
+            var needsNullable = Options.UseNullableReferenceTypes && !(navigation.ForeignKey.IsRequired && navigation.IsOnDependent);
+            var needsInitializer = Options.UseNullableReferenceTypes && navigation.ForeignKey.IsRequired && navigation.IsOnDependent;
+#>
+    public virtual <#= targetType #><#= needsNullable ? "?" : "" #> <#= navigation.Name #> { get; set; }<#= needsInitializer ? " = null!;" : "" #>
+<#
+        }
+    }
+
+    foreach (var skipNavigation in EntityType.GetSkipNavigations())
+    {
+        if (Options.UseDataAnnotations)
+        {
+            foreach (var dataAnnotation in skipNavigation.GetDataAnnotations(annotationCodeGenerator))
+            {
+#>
+    <#= code.Fragment(dataAnnotation) #>
+<#
+            }
+        }
+#>
+    public virtual ICollection<<#= skipNavigation.TargetEntityType.Name #>> <#= skipNavigation.Name #> { get; set; } = new List<<#= skipNavigation.TargetEntityType.Name #>>();
+<#
+    }
+#>
+    
+    internal static void OnEntityCreating(EntityTypeBuilder<<#= EntityType.Name #>> builder)
+    {
+<#
+    var anyConfiguration = false;
+
+    StringBuilder mainEnvironment;
+    if (EntityType?.Name != null) {
+        // Save all previously generated code, and start generating into a new temporary environment
+        mainEnvironment = GenerationEnvironment;
+        GenerationEnvironment = new StringBuilder();
+
+        if (anyConfiguration)
+        {
+            WriteLine("");
+        }
+
+        var anyEntityTypeConfiguration = false;
+        var key = EntityType.FindPrimaryKey();
+        if (key != null)
+        {
+            var keyFluentApiCalls = key.GetFluentApiCalls(annotationCodeGenerator);
+            if (keyFluentApiCalls != null
+                || (!key.IsHandledByConvention() && !Options.UseDataAnnotations))
+            {
+                if (keyFluentApiCalls != null)
+                {
+                    usings.AddRange(keyFluentApiCalls.GetRequiredUsings());
+                }
+#>
+        builder.HasKey(<#= code.Lambda(key.Properties, "e") #>)<#= code.Fragment(keyFluentApiCalls, indent: 2) #>;
+<#
+                anyEntityTypeConfiguration = true;
+            }
+        }
+
+        var entityTypeFluentApiCalls = EntityType.GetFluentApiCalls(annotationCodeGenerator)
+            ?.FilterChain(c => !(Options.UseDataAnnotations && c.IsHandledByDataAnnotations));
+        if (entityTypeFluentApiCalls != null)
+        {
+            usings.AddRange(entityTypeFluentApiCalls.GetRequiredUsings());
+
+            if (anyEntityTypeConfiguration)
+            {
+                WriteLine("");
+            }
+#>
+        builder<#= code.Fragment(entityTypeFluentApiCalls, indent: 3) #>;
+<#
+            anyEntityTypeConfiguration = true;
+        }
+
+        foreach (var index in EntityType.GetIndexes()
+            .Where(i => !(Options.UseDataAnnotations && i.IsHandledByDataAnnotations(annotationCodeGenerator))))
+        {
+            var indexFluentApiCalls = index.GetFluentApiCalls(annotationCodeGenerator);
+            if (indexFluentApiCalls != null)
+            {
+                usings.AddRange(indexFluentApiCalls.GetRequiredUsings());
+            }
+#>
+        builder.HasIndex(<#= code.Lambda(index.Properties, "e") #>, <#= code.Literal(index.GetDatabaseName()) #>)<#= code.Fragment(indexFluentApiCalls, indent: 3) #>;
+<#
+            anyEntityTypeConfiguration = true;
+        }
+
+        var firstPropertyDefinition = true;
+        foreach (var property in EntityType.GetProperties())
+        {
+            var propertyFluentApiCalls = property.GetFluentApiCalls(annotationCodeGenerator)
+                ?.FilterChain(c => !(Options.UseDataAnnotations && c.IsHandledByDataAnnotations)
+                    && !(c.Method == "IsRequired" && Options.UseNullableReferenceTypes && !property.ClrType.IsValueType));
+            if (propertyFluentApiCalls == null)
+            {
+                continue;
+            }
+
+            usings.AddRange(propertyFluentApiCalls.GetRequiredUsings());
+
+            if (anyEntityTypeConfiguration && firstPropertyDefinition)
+            {
+                WriteLine("");
+            }
+#>
+        builder.Property(e => e.<#= property.Name #>)<#= code.Fragment(propertyFluentApiCalls, indent: 3) #>;
+<#
+            anyEntityTypeConfiguration = true;
+            firstPropertyDefinition = false;
+        }
+
+        foreach (var foreignKey in EntityType.GetForeignKeys())
+        {
+            var foreignKeyFluentApiCalls = foreignKey.GetFluentApiCalls(annotationCodeGenerator)
+                ?.FilterChain(c => !(Options.UseDataAnnotations && c.IsHandledByDataAnnotations));
+            if (foreignKeyFluentApiCalls == null)
+            {
+                continue;
+            }
+
+            usings.AddRange(foreignKeyFluentApiCalls.GetRequiredUsings());
+
+            if (anyEntityTypeConfiguration)
+            {
+                WriteLine("");
+            }
+#>
+        builder.HasOne(d => d.<#= foreignKey.DependentToPrincipal.Name #>).<#= foreignKey.IsUnique ? "WithOne" : "WithMany" #>(<#= foreignKey.PrincipalToDependent != null ? $"p => p.{foreignKey.PrincipalToDependent.Name}" : "" #>)<#= code.Fragment(foreignKeyFluentApiCalls, indent: 3) #>;
+<#
+            anyEntityTypeConfiguration = true;
+        }
+
+        foreach (var skipNavigation in EntityType.GetSkipNavigations().Where(n => n.IsLeftNavigation()))
+        {
+            if (anyEntityTypeConfiguration)
+            {
+                WriteLine("");
+            }
+
+            var left = skipNavigation.ForeignKey;
+            var leftFluentApiCalls = left.GetFluentApiCalls(annotationCodeGenerator, useStrings: true);
+            var right = skipNavigation.Inverse.ForeignKey;
+            var rightFluentApiCalls = right.GetFluentApiCalls(annotationCodeGenerator, useStrings: true);
+            var joinEntityType = skipNavigation.JoinEntityType;
+
+            if (leftFluentApiCalls != null)
+            {
+                usings.AddRange(leftFluentApiCalls.GetRequiredUsings());
+            }
+
+            if (rightFluentApiCalls != null)
+            {
+                usings.AddRange(rightFluentApiCalls.GetRequiredUsings());
+            }
+#>
+        builder.HasMany(d => d.<#= skipNavigation.Name #>).WithMany(p => p.<#= skipNavigation.Inverse.Name #>)
+            .UsingEntity<Dictionary<string, object>>(
+                <#= code.Literal(joinEntityType.Name) #>,
+                r => r.HasOne<<#= right.PrincipalEntityType.Name #>>().WithMany()<#= code.Fragment(rightFluentApiCalls, indent: 6) #>,
+                l => l.HasOne<<#= left.PrincipalEntityType.Name #>>().WithMany()<#= code.Fragment(leftFluentApiCalls, indent: 6) #>,
+                j =>
+                {
+<#
+            var joinKey = joinEntityType.FindPrimaryKey();
+            var joinKeyFluentApiCalls = joinKey.GetFluentApiCalls(annotationCodeGenerator);
+
+            if (joinKeyFluentApiCalls != null)
+            {
+                usings.AddRange(joinKeyFluentApiCalls.GetRequiredUsings());
+            }
+#>
+                    j.HasKey(<#= code.Arguments(joinKey.Properties.Select(e => e.Name)) #>)<#= code.Fragment(joinKeyFluentApiCalls, indent: 7) #>;
+<#
+            var joinEntityTypeFluentApiCalls = joinEntityType.GetFluentApiCalls(annotationCodeGenerator);
+            if (joinEntityTypeFluentApiCalls != null)
+            {
+                usings.AddRange(joinEntityTypeFluentApiCalls.GetRequiredUsings());
+#>
+                    j<#= code.Fragment(joinEntityTypeFluentApiCalls, indent: 7) #>;
+<#
+            }
+
+            foreach (var index in joinEntityType.GetIndexes())
+            {
+                var indexFluentApiCalls = index.GetFluentApiCalls(annotationCodeGenerator);
+                if (indexFluentApiCalls != null)
+                {
+                    usings.AddRange(indexFluentApiCalls.GetRequiredUsings());
+                }
+#>
+                    j.HasIndex(<#= code.Literal(index.Properties.Select(e => e.Name).ToArray()) #>, <#= code.Literal(index.GetDatabaseName()) #>)<#= code.Fragment(indexFluentApiCalls, indent: 7) #>;
+<#
+            }
+
+            foreach (var property in joinEntityType.GetProperties())
+            {
+                var propertyFluentApiCalls = property.GetFluentApiCalls(annotationCodeGenerator);
+                if (propertyFluentApiCalls == null)
+                {
+                    continue;
+                }
+
+                usings.AddRange(propertyFluentApiCalls.GetRequiredUsings());
+#>
+                    j.IndexerProperty<<#= code.Reference(property.ClrType) #>>(<#= code.Literal(property.Name) #>)<#= code.Fragment(propertyFluentApiCalls, indent: 7) #>;
+<#
+            }
+#>
+                    });
+<#
+            anyEntityTypeConfiguration = true;
+        }
+
+        // If any significant code was generated, append it to the main environment
+        if (anyEntityTypeConfiguration)
+        {
+            mainEnvironment.Append(GenerationEnvironment);
+            anyConfiguration = true;
+        }
+
+        // Resume generating code into the main environment
+        GenerationEnvironment = mainEnvironment;
+    }
+#>
+    }
+}
+<#
+    var previousOutput = GenerationEnvironment;
+    GenerationEnvironment = new StringBuilder();
+
+    foreach (var ns in usings.Distinct().OrderBy(x => x, new NamespaceComparer()))
+    {
+#>
+using <#= ns #>;
+<#
+    }
+
+    WriteLine("");
+
+    GenerationEnvironment.Append(previousOutput);
+#>
